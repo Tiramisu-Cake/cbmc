@@ -1,0 +1,10 @@
+CORE gcc-only
+main.c
+--gcc --64 --little-endian
+^VERIFICATION SUCCESSFUL$
+^EXIT=0$
+^SIGNAL=0$
+--
+Invariant check failed
+^warning: ignoring
+: FAILURE

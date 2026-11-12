@@ -1,0 +1,10 @@
+CORE gcc-only
+main.c
+--gcc --64 --little-endian
+^VERIFICATION FAILED$
+.*zst-payload-negative.*: FAILURE$
+^EXIT=10$
+^SIGNAL=0$
+--
+Invariant check failed
+^warning: ignoring
