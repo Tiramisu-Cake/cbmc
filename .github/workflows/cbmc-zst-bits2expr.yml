@@ -1,22 +1,17 @@
-name: CBMC ZST bits2expr paired source gate
+name: CBMC ZST environment and util follow-up
 on:
   push:
-    branches: ['ci/zst-bits2expr-*']
+    branches: ['ci/zst-bits2expr-util-z3-*']
 permissions:
   contents: read
 concurrency:
-  group: cbmc-zst-${{ github.ref }}
+  group: cbmc-zst-util-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  paired:
+  util:
     if: github.repository == 'Tiramisu-Cake/cbmc'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    strategy:
-      fail-fast: false
-      max-parallel: 1
-      matrix:
-        variant: [baseline, fix]
     env:
       TESTPL_JOBS: '1'
       TESTPL_COLOR_OUTPUT: '0'
@@ -28,54 +23,39 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Initialize report directory
-        run: mkdir -p "$GITHUB_WORKSPACE/reports/${{ matrix.variant }}"
-      - name: Install stock CMake dependencies and pinned formatter
+        run: mkdir -p "$GITHUB_WORKSPACE/reports/fix"
+      - name: Install r2 dependencies plus Z3 and pinned formatter
         timeout-minutes: 10
-        run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y gcc-13 g++-13 flex bison make git curl patch cmake perl python3 python3-venv
-          python3 -m venv "$GITHUB_WORKSPACE/format-env"
-          "$GITHUB_WORKSPACE/format-env/bin/pip" install clang-format==18.1.8
-          mkdir -p "$GITHUB_WORKSPACE/toolchain"
-          ln -s /usr/bin/gcc-13 "$GITHUB_WORKSPACE/toolchain/gcc"
-          ln -s /usr/bin/g++-13 "$GITHUB_WORKSPACE/toolchain/g++"
-          echo "$GITHUB_WORKSPACE/toolchain" >> "$GITHUB_PATH"
-      - name: Prepare exact source and identical test-only overlay
+        run: python3 package/scripts/zst-bits2expr/followup.py install "$GITHUB_WORKSPACE/package" "$GITHUB_WORKSPACE/model" "$GITHUB_WORKSPACE/reports/fix"
+      - name: Prepare exact unchanged fix source
         timeout-minutes: 5
-        run: >-
-          python3 package/scripts/zst-bits2expr/runner.py prepare
-          '${{ matrix.variant }}' "$GITHUB_WORKSPACE/package"
-          "$GITHUB_WORKSPACE/model" "$GITHUB_WORKSPACE/reports/${{ matrix.variant }}"
+        run: python3 package/scripts/zst-bits2expr/followup.py prepare "$GITHUB_WORKSPACE/package" "$GITHUB_WORKSPACE/model" "$GITHUB_WORKSPACE/reports/fix"
       - name: Runner isolated synthetic checks
         timeout-minutes: 2
-        run: python3 package/scripts/zst-bits2expr/test_runner.py
-      - name: Configure and build cbmc and unit only
+        run: |
+          python3 package/scripts/zst-bits2expr/test_runner.py
+          python3 package/scripts/zst-bits2expr/test_followup.py
+      - name: Z3 package path version and check-sat preflight
+        timeout-minutes: 3
+        run: python3 package/scripts/zst-bits2expr/followup.py preflight "$GITHUB_WORKSPACE/package" "$GITHUB_WORKSPACE/model" "$GITHUB_WORKSPACE/reports/fix"
+      - name: Configure and build unit only with r2 flags
         timeout-minutes: 58
-        run: >-
-          python3 package/scripts/zst-bits2expr/runner.py build
-          '${{ matrix.variant }}' "$GITHUB_WORKSPACE/package"
-          "$GITHUB_WORKSPACE/model" "$GITHUB_WORKSPACE/reports/${{ matrix.variant }}"
-      - name: Focused cases then selected neighbours and util units
-        timeout-minutes: 25
-        run: >-
-          python3 package/scripts/zst-bits2expr/runner.py test
-          '${{ matrix.variant }}' "$GITHUB_WORKSPACE/package"
-          "$GITHUB_WORKSPACE/model" "$GITHUB_WORKSPACE/reports/${{ matrix.variant }}"
-      - name: Check source diff formatting with 18.1.8
+        run: python3 package/scripts/zst-bits2expr/followup.py build "$GITHUB_WORKSPACE/package" "$GITHUB_WORKSPACE/model" "$GITHUB_WORKSPACE/reports/fix"
+      - name: Record selection and run focused sanity then remaining util
+        timeout-minutes: 23
+        run: python3 package/scripts/zst-bits2expr/followup.py test "$GITHUB_WORKSPACE/package" "$GITHUB_WORKSPACE/model" "$GITHUB_WORKSPACE/reports/fix"
+      - name: Check unchanged source formatting with 18.1.8
         if: always()
         timeout-minutes: 3
-        run: |
-          python3 package/scripts/zst-bits2expr/check_format.py "$GITHUB_WORKSPACE/format-env/bin" "$GITHUB_WORKSPACE/reports/${{ matrix.variant }}"
+        run: python3 package/scripts/zst-bits2expr/check_format.py "$GITHUB_WORKSPACE/format-env/bin" "$GITHUB_WORKSPACE/reports/fix"
       - name: Finalize honest partial or NOT_RUN report
         if: always()
-        run: >-
-          python3 package/scripts/zst-bits2expr/runner.py finalize
-          '${{ matrix.variant }}' "$GITHUB_WORKSPACE/package"
-          "$GITHUB_WORKSPACE/model" "$GITHUB_WORKSPACE/reports/${{ matrix.variant }}"
+        timeout-minutes: 2
+        run: python3 package/scripts/zst-bits2expr/followup.py finalize "$GITHUB_WORKSPACE/package" "$GITHUB_WORKSPACE/model" "$GITHUB_WORKSPACE/reports/fix"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: cbmc-zst-${{ matrix.variant }}-${{ github.sha }}
-          path: reports/${{ matrix.variant }}/
+          name: cbmc-zst-util-fix-${{ github.sha }}
+          path: reports/fix/
           if-no-files-found: error
           retention-days: 14

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import resource
+import selectors
 import shutil
 import signal
 import subprocess
@@ -57,37 +58,60 @@ def execute(argv, cwd, log, seconds, output_limit=LIMIT):
               'status': 'NOT_RUN', 'timeout_seconds': seconds,
               'memory_limit_bytes_per_process': MEMORY,
               'output_limit_bytes': output_limit}
+    # Drain the pipe after the retained-log cap; never kill ar/ld with RLIMIT_FSIZE.
+    # None remains the r2 build API, with a bounded 16 MiB retained log.
+    cap = output_limit if output_limit is not None else 16 * LIMIT
+    record['output_limit_bytes'] = cap
+    record['file_size_limit'] = None
     log = Path(log)
+    raw_bytes = 0
+    stored_bytes = 0
+    timed_out = False
     with log.open('wb') as stream:
         try:
-            proc = subprocess.Popen(argv, cwd=cwd, stdout=stream,
+            proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT,
                                     start_new_session=True,
-                                    preexec_fn=lambda: limits(output_limit))
+                                    preexec_fn=lambda: limits(None))
         except OSError as error:
             record.update(status='START_ERROR', error=str(error), exit=None,
                           signal=None)
         else:
-            try:
-                rc = proc.wait(timeout=seconds)
-                record.update(status='EXITED', exit=rc if rc >= 0 else None,
-                              signal=-rc if rc < 0 else 0)
-            except subprocess.TimeoutExpired:
-                for pid in descendants(proc.pid):
-                    try:
-                        os.kill(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                os.killpg(proc.pid, signal.SIGKILL)
-                rc = proc.wait()
-                record.update(status='TIMEOUT', exit=None,
-                              signal=-rc if rc < 0 else 0)
+            with selectors.DefaultSelector() as selector:
+                selector.register(proc.stdout, selectors.EVENT_READ)
+                while selector.get_map() or proc.poll() is None:
+                    if not timed_out and time.monotonic() - start >= seconds:
+                        timed_out = True
+                        for pid in descendants(proc.pid):
+                            try:
+                                os.kill(pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        try:
+                            os.killpg(proc.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    for key, _ in selector.select(.05):
+                        chunk = os.read(key.fd, 65536)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        raw_bytes += len(chunk)
+                        retained = chunk[:max(0, cap - stored_bytes)]
+                        stream.write(retained)
+                        stored_bytes += len(retained)
+            rc = proc.wait()
+            proc.stdout.close()
+            record.update(status='TIMEOUT' if timed_out else 'EXITED',
+                          exit=rc if rc >= 0 else None,
+                          signal=-rc if rc < 0 else 0)
     record.update(seconds=time.monotonic() - start,
-                  rawKiB=log.stat().st_size / 1024,
+                  rawKiB=raw_bytes / 1024, retained_bytes=stored_bytes,
+                  overflow_bytes=raw_bytes - stored_bytes,
                   log_sha256=sha(log),
                   children_maxrss_KiB=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)
-    record['complete'] = output_limit is None or log.stat().st_size < output_limit
-    if not record['complete']:
+    record['complete'] = raw_bytes <= cap
+    if not record['complete'] and record['status'] == 'EXITED':
         record['status'] = 'OUTPUT_LIMIT'
     save(log.with_suffix('.json'), record)
     return record
